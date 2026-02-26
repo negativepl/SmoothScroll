@@ -26,6 +26,16 @@ struct Settings {
         get { defaults.stringArray(forKey: "excludedApps") ?? [] }
         set { defaults.set(newValue, forKey: "excludedApps") }
     }
+
+    static var instantStop: Bool {
+        get { defaults.object(forKey: "instantStop") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "instantStop") }
+    }
+
+    static var momentumFriction: Double {
+        get { defaults.object(forKey: "momentumFriction") as? Double ?? 0.15 }
+        set { defaults.set(newValue, forKey: "momentumFriction") }
+    }
 }
 
 // MARK: - SmoothScrollManager
@@ -47,6 +57,8 @@ class SmoothScrollManager: ObservableObject {
     @Published var enabled: Bool = Settings.enabled { didSet { Settings.enabled = enabled } }
     @Published var speed: Double = Settings.speed { didSet { Settings.speed = speed } }
     @Published var damping: Double = Settings.damping { didSet { Settings.damping = damping } }
+    @Published var instantStop: Bool = Settings.instantStop { didSet { Settings.instantStop = instantStop } }
+    @Published var momentumFriction: Double = Settings.momentumFriction { didSet { Settings.momentumFriction = momentumFriction } }
     @Published var excludedApps: Set<String> = Set(Settings.excludedApps) {
         didSet { Settings.excludedApps = Array(excludedApps) }
     }
@@ -130,8 +142,9 @@ class SmoothScrollManager: ObservableObject {
     }
 
     private func tick() {
-        // Stop immediately when user stopped scrolling (no new events for 100ms)
-        if CACurrentMediaTime() - lastScrollTime > 0.1 {
+        let idle = CACurrentMediaTime() - lastScrollTime > 0.1
+
+        if idle && instantStop {
             accY = 0; accX = 0
             errY = 0; errX = 0
             timer?.cancel()
@@ -140,8 +153,11 @@ class SmoothScrollManager: ObservableObject {
             return
         }
 
-        var stepY = accY * damping
-        var stepX = accX * damping
+        // During active scrolling use damping, after release use momentum friction
+        let d = idle ? momentumFriction : damping
+
+        var stepY = accY * d
+        var stepX = accX * d
 
         if abs(stepY) < 1.0 && abs(accY) >= 1.0 {
             stepY = copysign(1.0, accY)
@@ -269,12 +285,19 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            HStack {
-                Image(systemName: "computermouse.fill")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.blue)
-                Text("SmoothScroll")
-                    .font(.title2.bold())
+            HStack(spacing: 12) {
+                if let icon = NSApp.applicationIconImage {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 48, height: 48)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("SmoothScroll")
+                        .font(.title2.bold())
+                    Text("Smooth mouse scrolling for macOS")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
             }
             .padding(.horizontal, 24)
@@ -291,7 +314,7 @@ struct SettingsView: View {
                 .padding(.bottom, 20)
             }
         }
-        .frame(width: 460, height: 560)
+        .frame(minWidth: 400, idealWidth: 700, minHeight: 500, idealHeight: 750)
         .background(.ultraThinMaterial)
     }
 
@@ -348,6 +371,54 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Fine Tuning", systemImage: "tuningfork")
                 .font(.headline)
+
+            // After-scroll behavior tiles
+            HStack(spacing: 10) {
+                stopBehaviorTile(
+                    title: "Instant Stop",
+                    icon: "stop.circle.fill",
+                    desc: "Stops where you left off",
+                    selected: manager.instantStop
+                ) {
+                    manager.instantStop = true
+                }
+
+                stopBehaviorTile(
+                    title: "Momentum",
+                    icon: "arrow.up.arrow.down.circle.fill",
+                    desc: "Coasts like a trackpad",
+                    selected: !manager.instantStop
+                ) {
+                    manager.instantStop = false
+                }
+            }
+
+            if !manager.instantStop {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Coast Duration")
+                        Spacer()
+                        Text(coastLabel(manager.momentumFriction))
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.subheadline)
+
+                    // Inverted: left = long coast (low friction), right = short coast (high friction)
+                    Slider(value: Binding(
+                        get: { 1.0 - momentumToSlider(manager.momentumFriction) },
+                        set: { manager.momentumFriction = sliderToMomentum(1.0 - $0) }
+                    ), in: 0...1)
+
+                    HStack {
+                        Text("Short").font(.caption2).foregroundStyle(.tertiary)
+                        Spacer()
+                        Text("Long").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.top, 4)
+            }
+
+            Divider()
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -468,6 +539,53 @@ struct SettingsView: View {
 
     // MARK: Actions
 
+    private func stopBehaviorTile(title: String, icon: String, desc: String,
+                                    selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 22))
+                    .foregroundStyle(selected ? .blue : .secondary)
+                    .frame(height: 28)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(desc)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 4)
+            .background(selected ? AnyShapeStyle(.blue.opacity(0.15)) : AnyShapeStyle(.clear))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(selected ? .blue : .clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func momentumToSlider(_ f: Double) -> Double {
+        let lo = log(0.03), hi = log(0.40)
+        return (log(max(f, 0.03)) - lo) / (hi - lo)
+    }
+
+    private func sliderToMomentum(_ s: Double) -> Double {
+        let lo = log(0.03), hi = log(0.40)
+        return exp(lo + s * (hi - lo))
+    }
+
+    private func coastLabel(_ f: Double) -> String {
+        if f < 0.06 { return "Very Long" }
+        if f < 0.12 { return "Long" }
+        if f < 0.22 { return "Medium" }
+        return "Short"
+    }
+
     private func applyPreset(_ preset: ScrollPreset) {
         withAnimation(.easeInOut(duration: 0.2)) {
             selectedPreset = preset.id
@@ -584,7 +702,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let hostingController = NSHostingController(rootView: SettingsView())
             let window = NSWindow(contentViewController: hostingController)
             window.title = "SmoothScroll"
-            window.styleMask = [.titled, .closable, .fullSizeContentView]
+            window.styleMask = [.titled, .closable, .resizable, .fullSizeContentView]
+            window.setContentSize(NSSize(width: 700, height: 750))
+            window.minSize = NSSize(width: 400, height: 500)
+            window.maxSize = NSSize(width: 700, height: 900)
             window.titlebarAppearsTransparent = true
             window.isMovableByWindowBackground = true
             window.center()
