@@ -4,7 +4,9 @@ A lightweight macOS menu bar app that makes mouse scroll wheel buttery smooth â€
 
 No subscription. No bloat. Just ~200 lines of Swift.
 
-![SmoothScroll icon](AppIcon.icns)
+<p align="center">
+  <img src="icon.png" width="128" alt="SmoothScroll icon">
+</p>
 
 ## Why?
 
