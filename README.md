@@ -29,6 +29,12 @@ Works with any mouse (Logitech, Razer, generic USB mice, etc.) without affecting
 
 ## Install
 
+### Download (recommended)
+
+1. Go to [**Releases**](https://github.com/negativepl/SmoothScroll/releases/latest)
+2. Download **SmoothScroll-1.0.dmg**
+3. Open the DMG and drag **SmoothScroll** to **Applications**
+
 ### Build from source
 
 Requires Xcode Command Line Tools (`xcode-select --install`).
