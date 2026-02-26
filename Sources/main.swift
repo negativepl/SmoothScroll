@@ -327,38 +327,21 @@ struct SettingsView: View {
 
             HStack(spacing: 10) {
                 ForEach(presets) { preset in
-                    Button {
+                    presetTile(
+                        title: preset.name, icon: preset.icon,
+                        desc: preset.desc, selected: selectedPreset == preset.id
+                    ) {
                         applyPreset(preset)
-                    } label: {
-                        VStack(spacing: 6) {
-                            Image(systemName: preset.icon)
-                                .font(.system(size: 22))
-                                .frame(height: 28)
-                            Text(preset.name)
-                                .font(.system(size: 12, weight: .semibold))
-                            Text(preset.desc)
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 4)
-                        .background(
-                            selectedPreset == preset.id
-                            ? AnyShapeStyle(.blue.opacity(0.15))
-                            : AnyShapeStyle(.clear)
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 10))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(selectedPreset == preset.id ? .blue : .clear, lineWidth: 1.5)
-                        )
                     }
-                    .buttonStyle(.plain)
                 }
+
+                presetTile(
+                    title: "Custom", icon: "slider.horizontal.2.square",
+                    desc: "Your own settings",
+                    selected: selectedPreset == nil
+                ) { }
+                .opacity(selectedPreset == nil ? 1.0 : 0.5)
+                .allowsHitTesting(false)
             }
         }
         .padding(16)
@@ -537,7 +520,37 @@ struct SettingsView: View {
         .background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
     }
 
-    // MARK: Actions
+    // MARK: Tile Helpers
+
+    private func presetTile(title: String, icon: String, desc: String,
+                            selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 22))
+                    .foregroundStyle(selected ? .blue : .secondary)
+                    .frame(height: 28)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(desc)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 4)
+            .background(selected ? AnyShapeStyle(.blue.opacity(0.15)) : AnyShapeStyle(.clear))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(selected ? .blue : .clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
 
     private func stopBehaviorTile(title: String, icon: String, desc: String,
                                     selected: Bool, action: @escaping () -> Void) -> some View {
