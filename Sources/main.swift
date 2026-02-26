@@ -17,11 +17,10 @@ class SmoothScrollManager {
     private var animating = false
 
     var enabled = true
-    var speed: Double = 5.0
-    var damping: Double = 0.06 // fraction of remaining scroll consumed per tick
+    var speed: Double = 1.0
+    var damping: Double = 0.05 // fraction of remaining scroll consumed per tick
 
     private let fps: Double = 120
-    private let threshold: Double = 0.3
 
     func start() -> Bool {
         let mask = CGEventMask(1 << CGEventType.scrollWheel.rawValue)
@@ -95,18 +94,22 @@ class SmoothScrollManager {
         var stepY = accY * damping
         var stepX = accX * damping
 
-        // If remaining delta is tiny, consume it all to finish cleanly
-        if abs(accY) < threshold { stepY = accY }
-        if abs(accX) < threshold { stepX = accX }
+        // When the exponential step drops below 1px, switch to constant 1px/frame.
+        // This prevents visible discrete jumps at the tail — at 120Hz,
+        // 1px per frame is imperceptibly smooth.
+        if abs(stepY) < 1.0 && abs(accY) >= 1.0 {
+            stepY = copysign(1.0, accY)
+        }
+        if abs(stepX) < 1.0 && abs(accX) >= 1.0 {
+            stepX = copysign(1.0, accX)
+        }
 
         accY -= stepY
         accX -= stepX
 
-        if abs(stepY) > 0.01 || abs(stepX) > 0.01 {
-            postEvent(dy: stepY, dx: stepX)
-        }
+        postEvent(dy: stepY, dx: stepX)
 
-        if abs(accY) < 0.01 && abs(accX) < 0.01 {
+        if abs(accY) < 0.5 && abs(accX) < 0.5 {
             accY = 0; accX = 0
             errY = 0; errX = 0
             timer?.cancel()
@@ -206,11 +209,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Speed submenu
         let speedSub = NSMenu()
-        for (label, val) in [("Slow", 2.0), ("Normal", 5.0), ("Fast", 12.0), ("Very Fast", 25.0)] {
+        for (label, val) in [("Slow", 0.5), ("Normal", 1.0), ("Fast", 2.0), ("Very Fast", 4.0)] {
             let item = NSMenuItem(title: label, action: #selector(setSpeed(_:)), keyEquivalent: "")
             item.target = self
             item.tag = Int(val * 10)
-            item.state = abs(val - manager.speed) < 0.01 ? .on : .off
+            item.state = abs(val - manager.speed) < 0.05 ? .on : .off
             speedSub.addItem(item)
         }
         let speedItem = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
@@ -219,11 +222,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Smoothness submenu
         let smoothSub = NSMenu()
-        for (label, val) in [("Very Smooth", 0.03), ("Smooth", 0.06), ("Normal", 0.12), ("Responsive", 0.30)] {
+        for (label, val) in [("Very Smooth", 0.03), ("Smooth", 0.05), ("Normal", 0.10), ("Responsive", 0.25)] {
             let item = NSMenuItem(title: label, action: #selector(setSmoothness(_:)), keyEquivalent: "")
             item.target = self
             item.tag = Int(val * 1000)
-            item.state = abs(val - manager.damping) < 0.01 ? .on : .off
+            item.state = abs(val - manager.damping) < 0.005 ? .on : .off
             smoothSub.addItem(item)
         }
         let smoothItem = NSMenuItem(title: "Smoothness", action: nil, keyEquivalent: "")
