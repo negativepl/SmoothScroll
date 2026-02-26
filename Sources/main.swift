@@ -1,9 +1,36 @@
 import Cocoa
+import SwiftUI
 import ServiceManagement
+
+// MARK: - Settings (UserDefaults)
+
+struct Settings {
+    private static let defaults = UserDefaults.standard
+
+    static var speed: Double {
+        get { defaults.object(forKey: "speed") as? Double ?? 0.6 }
+        set { defaults.set(newValue, forKey: "speed") }
+    }
+
+    static var damping: Double {
+        get { defaults.object(forKey: "damping") as? Double ?? 0.02 }
+        set { defaults.set(newValue, forKey: "damping") }
+    }
+
+    static var enabled: Bool {
+        get { defaults.object(forKey: "enabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "enabled") }
+    }
+
+    static var excludedApps: [String] {
+        get { defaults.stringArray(forKey: "excludedApps") ?? [] }
+        set { defaults.set(newValue, forKey: "excludedApps") }
+    }
+}
 
 // MARK: - SmoothScrollManager
 
-class SmoothScrollManager {
+class SmoothScrollManager: ObservableObject {
     static let shared = SmoothScrollManager()
 
     fileprivate var eventTap: CFMachPort?
@@ -15,10 +42,14 @@ class SmoothScrollManager {
     private var errY: Double = 0
     private var errX: Double = 0
     private var animating = false
+    private var lastScrollTime: Double = 0
 
-    var enabled = true
-    var speed: Double = 1.0
-    var damping: Double = 0.05 // fraction of remaining scroll consumed per tick
+    @Published var enabled: Bool = Settings.enabled { didSet { Settings.enabled = enabled } }
+    @Published var speed: Double = Settings.speed { didSet { Settings.speed = speed } }
+    @Published var damping: Double = Settings.damping { didSet { Settings.damping = damping } }
+    @Published var excludedApps: Set<String> = Set(Settings.excludedApps) {
+        didSet { Settings.excludedApps = Array(excludedApps) }
+    }
 
     private let fps: Double = 120
 
@@ -58,25 +89,33 @@ class SmoothScrollManager {
     fileprivate func handleScroll(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         guard enabled else { return Unmanaged.passUnretained(event) }
 
+        if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           excludedApps.contains(bundleId) {
+            return Unmanaged.passUnretained(event)
+        }
+
         let dy = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
         let dx = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)
         let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
         let momentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
 
-
-        // Trackpad has scroll phases (began=1, changed=2, ended=4) or momentum phases.
-        // Mouse wheel (even Logitech "smooth scroll") has phase=0 and momentum=0.
-        let isTrackpad = phase != 0 || momentum != 0
-        if isTrackpad {
+        if phase != 0 || momentum != 0 {
             return Unmanaged.passUnretained(event)
         }
 
-        // Mouse wheel — accumulate pixel delta and smooth it out
+        if (Double(dy) > 0 && accY < 0) || (Double(dy) < 0 && accY > 0) {
+            accY = 0; errY = 0
+        }
+        if (Double(dx) > 0 && accX < 0) || (Double(dx) < 0 && accX > 0) {
+            accX = 0; errX = 0
+        }
+
         accY += Double(dy) * speed
         accX += Double(dx) * speed
+        lastScrollTime = CACurrentMediaTime()
 
         startAnimation()
-        return nil // suppress original discrete event
+        return nil
     }
 
     private func startAnimation() {
@@ -91,12 +130,19 @@ class SmoothScrollManager {
     }
 
     private func tick() {
+        // Stop immediately when user stopped scrolling (no new events for 100ms)
+        if CACurrentMediaTime() - lastScrollTime > 0.1 {
+            accY = 0; accX = 0
+            errY = 0; errX = 0
+            timer?.cancel()
+            timer = nil
+            animating = false
+            return
+        }
+
         var stepY = accY * damping
         var stepX = accX * damping
 
-        // When the exponential step drops below 1px, switch to constant 1px/frame.
-        // This prevents visible discrete jumps at the tail — at 120Hz,
-        // 1px per frame is imperceptibly smooth.
         if abs(stepY) < 1.0 && abs(accY) >= 1.0 {
             stepY = copysign(1.0, accY)
         }
@@ -119,7 +165,6 @@ class SmoothScrollManager {
     }
 
     private func postEvent(dy: Double, dx: Double) {
-        // Track sub-pixel error to avoid rounding drift
         let adjY = dy + errY
         let adjX = dx + errX
         let pxY = Int32(round(adjY))
@@ -138,20 +183,17 @@ class SmoothScrollManager {
             wheel3: 0
         ) else { return }
 
-        // Mark as continuous so macOS treats it like trackpad scrolling
         ev.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-        // Post downstream of our tap to avoid recursion
         ev.post(tap: .cgSessionEventTap)
     }
 }
 
-// MARK: - Event Tap Callback (C function pointer — must not capture context)
+// MARK: - Event Tap Callback
 
 private let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
     guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
     let mgr = Unmanaged<SmoothScrollManager>.fromOpaque(userInfo).takeUnretainedValue()
 
-    // Re-enable tap if the system disabled it
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let tap = mgr.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
         return Unmanaged.passUnretained(event)
@@ -160,16 +202,319 @@ private let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
     return mgr.handleScroll(event)
 }
 
+// MARK: - Presets
+
+struct ScrollPreset: Identifiable {
+    let id: String
+    let name: String
+    let icon: String
+    let speed: Double
+    let damping: Double
+    let desc: String
+}
+
+let presets = [
+    ScrollPreset(id: "silky", name: "Silky", icon: "wind",
+                 speed: 0.3, damping: 0.008, desc: "Ultra-smooth, gentle"),
+    ScrollPreset(id: "balanced", name: "Balanced", icon: "circle.grid.2x2",
+                 speed: 0.6, damping: 0.02, desc: "Best for most users"),
+    ScrollPreset(id: "fast", name: "Fast", icon: "hare",
+                 speed: 1.2, damping: 0.06, desc: "Quick & responsive"),
+    ScrollPreset(id: "precise", name: "Precise", icon: "scope",
+                 speed: 0.2, damping: 0.012, desc: "Pixel-perfect control"),
+]
+
+// MARK: - Damping ↔ Slider mapping (log scale)
+
+func dampingToSlider(_ d: Double) -> Double {
+    let lo = log(0.005), hi = log(0.20)
+    return (log(max(d, 0.005)) - lo) / (hi - lo)
+}
+
+func sliderToDamping(_ s: Double) -> Double {
+    let lo = log(0.005), hi = log(0.20)
+    return exp(lo + s * (hi - lo))
+}
+
+func dampingLabel(_ d: Double) -> String {
+    if d < 0.012 { return "Very Smooth" }
+    if d < 0.035 { return "Smooth" }
+    if d < 0.07 { return "Normal" }
+    return "Responsive"
+}
+
+// MARK: - SwiftUI Settings View
+
+struct SettingsView: View {
+    @ObservedObject var manager = SmoothScrollManager.shared
+    @State private var dampingSlider: Double
+    @State private var selectedPreset: String?
+    @State private var excludedList: [String]
+
+    init() {
+        let mgr = SmoothScrollManager.shared
+        _dampingSlider = State(initialValue: dampingToSlider(mgr.damping))
+        _excludedList = State(initialValue: Settings.excludedApps)
+
+        // Detect current preset
+        var matched: String? = nil
+        for p in presets {
+            if abs(mgr.speed - p.speed) < 0.01 && abs(mgr.damping - p.damping) < 0.001 {
+                matched = p.id
+            }
+        }
+        _selectedPreset = State(initialValue: matched)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "computermouse.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.blue)
+                Text("SmoothScroll")
+                    .font(.title2.bold())
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+
+            ScrollView {
+                VStack(spacing: 16) {
+                    presetsCard
+                    slidersCard
+                    excludedCard
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 20)
+            }
+        }
+        .frame(width: 460, height: 560)
+        .background(.ultraThinMaterial)
+    }
+
+    // MARK: Presets Card
+
+    private var presetsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Presets", systemImage: "slider.horizontal.3")
+                .font(.headline)
+
+            HStack(spacing: 10) {
+                ForEach(presets) { preset in
+                    Button {
+                        applyPreset(preset)
+                    } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: preset.icon)
+                                .font(.system(size: 22))
+                                .frame(height: 28)
+                            Text(preset.name)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(preset.desc)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 4)
+                        .background(
+                            selectedPreset == preset.id
+                            ? AnyShapeStyle(.blue.opacity(0.15))
+                            : AnyShapeStyle(.clear)
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: 10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(selectedPreset == preset.id ? .blue : .clear, lineWidth: 1.5)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(16)
+        .background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    // MARK: Sliders Card
+
+    private var slidersCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Fine Tuning", systemImage: "tuningfork")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Scroll Distance")
+                    Spacer()
+                    Text(String(format: "%.2fx", manager.speed))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .font(.subheadline)
+
+                Slider(value: $manager.speed, in: 0.05...3.0) { _ in
+                    selectedPreset = nil
+                }
+
+                HStack {
+                    Text("Less").font(.caption2).foregroundStyle(.tertiary)
+                    Spacer()
+                    Text("More").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Smoothness")
+                    Spacer()
+                    Text(dampingLabel(manager.damping))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.subheadline)
+
+                Slider(value: $dampingSlider, in: 0...1) { _ in
+                    manager.damping = sliderToDamping(dampingSlider)
+                    selectedPreset = nil
+                }
+
+                HStack {
+                    Text("Very Smooth").font(.caption2).foregroundStyle(.tertiary)
+                    Spacer()
+                    Text("Responsive").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(16)
+        .background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    // MARK: Excluded Apps Card
+
+    private var excludedCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Disabled for Apps", systemImage: "xmark.app")
+                .font(.headline)
+
+            if excludedList.isEmpty {
+                Text("No excluded apps — smooth scrolling is active everywhere.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(excludedList, id: \.self) { bundleId in
+                        HStack {
+                            appIcon(for: bundleId)
+                                .frame(width: 20, height: 20)
+                            Text(appName(for: bundleId))
+                                .font(.subheadline)
+                            Spacer()
+                            Button {
+                                removeApp(bundleId)
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 8)
+
+                        if bundleId != excludedList.last {
+                            Divider().padding(.leading, 32)
+                        }
+                    }
+                }
+                .padding(4)
+                .background(.background.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Menu {
+                let apps = NSWorkspace.shared.runningApplications
+                    .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != nil }
+                    .filter { !excludedList.contains($0.bundleIdentifier!) }
+                    .filter { $0.bundleIdentifier != "com.local.smoothscroll" }
+                    .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+
+                if apps.isEmpty {
+                    Text("No apps to add")
+                } else {
+                    ForEach(apps, id: \.processIdentifier) { app in
+                        Button(app.localizedName ?? app.bundleIdentifier ?? "?") {
+                            if let bid = app.bundleIdentifier {
+                                addApp(bid)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("Add App...", systemImage: "plus")
+                    .font(.subheadline)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        .padding(16)
+        .background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    // MARK: Actions
+
+    private func applyPreset(_ preset: ScrollPreset) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            selectedPreset = preset.id
+        }
+        manager.speed = preset.speed
+        manager.damping = preset.damping
+        dampingSlider = dampingToSlider(preset.damping)
+    }
+
+    private func addApp(_ bundleId: String) {
+        excludedList.append(bundleId)
+        manager.excludedApps = Set(excludedList)
+        Settings.excludedApps = excludedList
+    }
+
+    private func removeApp(_ bundleId: String) {
+        excludedList.removeAll { $0 == bundleId }
+        manager.excludedApps = Set(excludedList)
+        Settings.excludedApps = excludedList
+    }
+
+    private func appName(for bundleId: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            return FileManager.default.displayName(atPath: url.path)
+        }
+        return bundleId
+    }
+
+    private func appIcon(for bundleId: String) -> Image {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            let nsImage = NSWorkspace.shared.icon(forFile: url.path)
+            return Image(nsImage: nsImage)
+        }
+        return Image(systemName: "app")
+    }
+}
+
 // MARK: - AppDelegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let manager = SmoothScrollManager.shared
+    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
 
-        // Check accessibility and prompt if needed
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(opts)
 
@@ -202,36 +547,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let toggleItem = NSMenuItem(title: "Smooth Scrolling", action: #selector(toggle(_:)), keyEquivalent: "")
         toggleItem.target = self
-        toggleItem.state = .on
+        toggleItem.state = manager.enabled ? .on : .off
         menu.addItem(toggleItem)
 
         menu.addItem(.separator())
 
-        // Speed submenu
-        let speedSub = NSMenu()
-        for (label, val) in [("Slow", 0.5), ("Normal", 1.0), ("Fast", 2.0), ("Very Fast", 4.0)] {
-            let item = NSMenuItem(title: label, action: #selector(setSpeed(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = Int(val * 10)
-            item.state = abs(val - manager.speed) < 0.05 ? .on : .off
-            speedSub.addItem(item)
-        }
-        let speedItem = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
-        speedItem.submenu = speedSub
-        menu.addItem(speedItem)
-
-        // Smoothness submenu
-        let smoothSub = NSMenu()
-        for (label, val) in [("Very Smooth", 0.03), ("Smooth", 0.05), ("Normal", 0.10), ("Responsive", 0.25)] {
-            let item = NSMenuItem(title: label, action: #selector(setSmoothness(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = Int(val * 1000)
-            item.state = abs(val - manager.damping) < 0.005 ? .on : .off
-            smoothSub.addItem(item)
-        }
-        let smoothItem = NSMenuItem(title: "Smoothness", action: nil, keyEquivalent: "")
-        smoothItem.submenu = smoothSub
-        menu.addItem(smoothItem)
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
 
@@ -256,16 +579,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         sender.state = manager.enabled ? .on : .off
     }
 
-    @objc private func setSpeed(_ sender: NSMenuItem) {
-        manager.speed = Double(sender.tag) / 10.0
-        sender.menu?.items.forEach { $0.state = .off }
-        sender.state = .on
-    }
-
-    @objc private func setSmoothness(_ sender: NSMenuItem) {
-        manager.damping = Double(sender.tag) / 1000.0
-        sender.menu?.items.forEach { $0.state = .off }
-        sender.state = .on
+    @objc private func openSettings() {
+        if settingsWindow == nil {
+            let hostingController = NSHostingController(rootView: SettingsView())
+            let window = NSWindow(contentViewController: hostingController)
+            window.title = "SmoothScroll"
+            window.styleMask = [.titled, .closable, .fullSizeContentView]
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.center()
+            window.isReleasedWhenClosed = false
+            settingsWindow = window
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
@@ -291,13 +618,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         manager.stop()
         NSApp.terminate(nil)
     }
-
 }
 
 // MARK: - Main
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory) // menu bar only, no dock icon
+app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

@@ -10,7 +10,8 @@ echo "Compiling..."
 mkdir -p "$BUILD_DIR"
 swiftc -O -o "$BUILD_DIR/$APP_NAME" Sources/main.swift \
     -framework Cocoa \
-    -framework CoreGraphics
+    -framework CoreGraphics \
+    -framework SwiftUI
 
 echo "Creating app bundle..."
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
