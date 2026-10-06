@@ -16,7 +16,8 @@ Works with any mouse (Logitech, Razer, generic USB mice, etc.) without affecting
 
 ## Features
 
-- **Smooth scrolling** with exponential ease-out animation at 120Hz
+- **Smooth scrolling** with exponential ease-out animation, synced to the display refresh rate
+- **Trackpad gestures** — sends scroll phases so apps rubber-band at edges like with a trackpad (can be turned off)
 - **Automatic mouse/trackpad detection** — passes trackpad events through unchanged, works with mice that report as "continuous" (e.g. Logitech smooth scroll)
 - **Presets** — Silky, Balanced, Fast, Precise — one-click tuning
 - **Fine-tuning sliders** for scroll distance and smoothness

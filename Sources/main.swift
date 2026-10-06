@@ -57,6 +57,11 @@ struct Settings {
         set { defaults.set(newValue, forKey: "modifierKeysEnabled") }
     }
 
+    static var gesturePhasesEnabled: Bool {
+        get { defaults.object(forKey: "gesturePhasesEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "gesturePhasesEnabled") }
+    }
+
     static var appProfiles: [String: AppScrollProfile] {
         get {
             guard let data = defaults.data(forKey: "appProfiles"),
@@ -90,6 +95,11 @@ class SmoothScrollManager: ObservableObject {
     fileprivate var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var timer: DispatchSourceTimer?
+    private var displayLink: CADisplayLink?
+    private var lastFrameTime: Double = 0
+
+    private enum Gesture { case idle, scrolling, momentumPending, momentum }
+    private var gesture: Gesture = .idle
 
     private var accY: Double = 0
     private var accX: Double = 0
@@ -115,6 +125,7 @@ class SmoothScrollManager: ObservableObject {
     @Published var instantStop: Bool = Settings.instantStop { didSet { Settings.instantStop = instantStop } }
     @Published var momentumFriction: Double = Settings.momentumFriction { didSet { Settings.momentumFriction = momentumFriction } }
     @Published var modifierKeysEnabled: Bool = Settings.modifierKeysEnabled { didSet { Settings.modifierKeysEnabled = modifierKeysEnabled } }
+    @Published var gesturePhasesEnabled: Bool = Settings.gesturePhasesEnabled { didSet { Settings.gesturePhasesEnabled = gesturePhasesEnabled } }
     @Published var appProfiles: [String: AppScrollProfile] = Settings.appProfiles {
         didSet { Settings.appProfiles = appProfiles }
     }
@@ -167,11 +178,7 @@ class SmoothScrollManager: ObservableObject {
     }
 
     func stop() {
-        timer?.cancel()
-        timer = nil
-        animating = false
-        accY = 0; accX = 0
-        errY = 0; errX = 0
+        endAnimation()
         if zoomPhaseActive {
             postMagnifyEvent(magnification: 0, phase: 4)
             zoomPhaseActive = false
@@ -220,13 +227,7 @@ class SmoothScrollManager: ObservableObject {
             let flags = event.flags
             // Ctrl+scroll = smooth pinch-to-zoom (magnification gesture)
             if flags.contains(.maskControl) {
-                accY = 0; accX = 0
-                errY = 0; errX = 0
-                if animating {
-                    timer?.cancel()
-                    timer = nil
-                    animating = false
-                }
+                endAnimation()
                 if dy != 0 {
                     zoomAcc += Double(dy) * 0.06
                     zoomMouseLocation = event.location
@@ -257,6 +258,11 @@ class SmoothScrollManager: ObservableObject {
             accX = 0; errX = 0
         }
 
+        // New wheel input while coasting = fingers back on the trackpad
+        if gesture == .momentum || gesture == .momentumPending {
+            finishGesture()
+        }
+
         accY += Double(finalDy) * effectiveSpeed * scrollMultiplier
         accX += Double(finalDx) * effectiveSpeed * scrollMultiplier
         lastScrollTime = CACurrentMediaTime()
@@ -272,42 +278,72 @@ class SmoothScrollManager: ObservableObject {
     private func startAnimation() {
         guard !animating else { return }
         animating = true
+        lastFrameTime = 0
+
+        let mouse = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main {
+            // Tick in sync with the refresh of the display under the cursor
+            let link = screen.displayLink(target: self, selector: #selector(displayLinkFired(_:)))
+            let maxFps = Float(screen.maximumFramesPerSecond)
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, maxFps), maximum: maxFps, preferred: maxFps)
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+            return
+        }
 
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now(), repeating: 1.0 / fps)
-        t.setEventHandler { [weak self] in self?.tick() }
+        t.setEventHandler { [weak self] in self?.tick(frames: 1) }
         t.resume()
         timer = t
     }
 
-    private func tick() {
+    @objc private func displayLinkFired(_ link: CADisplayLink) {
+        let dt = link.targetTimestamp - (lastFrameTime > 0 ? lastFrameTime : link.timestamp)
+        lastFrameTime = link.targetTimestamp
+        tick(frames: min(dt, 0.05) * fps)
+    }
+
+    private func endAnimation() {
+        displayLink?.invalidate()
+        displayLink = nil
+        timer?.cancel()
+        timer = nil
+        animating = false
+        accY = 0; accX = 0
+        errY = 0; errX = 0
+        finishGesture()
+    }
+
+    // `frames` = elapsed time in units of one frame at `fps`, which damping values are tuned for
+    private func tick(frames: Double) {
         let idle = CACurrentMediaTime() - lastScrollTime > 0.15
 
         if idle && activeInstantStop {
-            accY = 0; accX = 0
-            errY = 0; errX = 0
-            timer?.cancel()
-            timer = nil
-            animating = false
+            endAnimation()
             return
         }
 
-        let d = idle ? activeMomentumFriction : max(activeDamping, 0.03)
+        if idle && gesture == .scrolling {
+            // Wheel stopped: lift the "fingers", the rest coasts as momentum
+            post(pxY: 0, pxX: 0, scrollPhase: .ended)
+            gesture = .momentumPending
+        }
 
-        let stepY = accY * d
-        let stepX = accX * d
+        let d = idle ? activeMomentumFriction : max(activeDamping, 0.03)
+        let k = 1 - pow(1 - d, frames)
+
+        let stepY = accY * k
+        let stepX = accX * k
 
         accY -= stepY
         accX -= stepX
 
         postEvent(dy: stepY, dx: stepX)
 
-        if abs(accY) < 0.5 && abs(accX) < 0.5 {
-            accY = 0; accX = 0
-            errY = 0; errX = 0
-            timer?.cancel()
-            timer = nil
-            animating = false
+        // An open gesture stays alive between wheel notches until the wheel goes idle
+        if abs(accY) < 0.5 && abs(accX) < 0.5 && (idle || gesture != .scrolling) {
+            endAnimation()
         }
     }
 
@@ -321,6 +357,37 @@ class SmoothScrollManager: ObservableObject {
 
         guard pxY != 0 || pxX != 0 else { return }
 
+        switch gesture {
+        case .idle:
+            if gesturePhasesEnabled {
+                gesture = .scrolling
+                post(pxY: pxY, pxX: pxX, scrollPhase: .began)
+            } else {
+                post(pxY: pxY, pxX: pxX)
+            }
+        case .scrolling:
+            post(pxY: pxY, pxX: pxX, scrollPhase: .changed)
+        case .momentumPending:
+            gesture = .momentum
+            post(pxY: pxY, pxX: pxX, momentumPhase: .begin)
+        case .momentum:
+            post(pxY: pxY, pxX: pxX, momentumPhase: .continuous)
+        }
+    }
+
+    // Trackpad-style sequence: began → changed… → ended, then momentum begin → continuous… → end
+    private func finishGesture() {
+        switch gesture {
+        case .scrolling: post(pxY: 0, pxX: 0, scrollPhase: .ended)
+        case .momentum: post(pxY: 0, pxX: 0, momentumPhase: .end)
+        case .idle, .momentumPending: break
+        }
+        gesture = .idle
+    }
+
+    private func post(pxY: Int32, pxX: Int32,
+                      scrollPhase: CGScrollPhase? = nil,
+                      momentumPhase: CGMomentumScrollPhase = .none) {
         guard let ev = CGEvent(
             scrollWheelEvent2Source: nil,
             units: .pixel,
@@ -331,6 +398,8 @@ class SmoothScrollManager: ObservableObject {
         ) else { return }
 
         ev.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        ev.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(scrollPhase?.rawValue ?? 0))
+        ev.setIntegerValueField(.scrollWheelEventMomentumPhase, value: Int64(momentumPhase.rawValue))
         ev.post(tap: .cgSessionEventTap)
     }
 
@@ -886,6 +955,21 @@ struct SettingsView: View {
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
+            }
+            .padding(.horizontal, 4)
+
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Trackpad Gestures")
+                        .font(.subheadline)
+                    Text("Send scroll phases so apps bounce at edges like with a trackpad")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $manager.gesturePhasesEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
             }
             .padding(.horizontal, 4)
         }
