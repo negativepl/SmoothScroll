@@ -33,7 +33,7 @@ Works with any mouse (Logitech, Razer, generic USB mice, etc.) without affecting
 ### Download (recommended)
 
 1. Go to [**Releases**](https://github.com/negativepl/SmoothScroll/releases/latest)
-2. Download **SmoothScroll-1.0.dmg**
+2. Download **SmoothScroll-1.1.dmg**
 3. Open the DMG and drag **SmoothScroll** to **Applications**
 
 ### Build from source
@@ -97,7 +97,8 @@ Click the mouse icon in the menu bar:
 
 ## Requirements
 
-- macOS 13.0+ (Ventura or later)
+- macOS 26.0+ (Tahoe or later)
+- The prebuilt DMG is Apple Silicon only
 - Accessibility permission
 
 ## License

@@ -9,6 +9,7 @@ BUILD_DIR="build"
 echo "Compiling..."
 mkdir -p "$BUILD_DIR"
 swiftc -O -o "$BUILD_DIR/$APP_NAME" Sources/main.swift \
+    -target "$(uname -m)-apple-macosx26.0" \
     -framework Cocoa \
     -framework CoreGraphics \
     -framework SwiftUI

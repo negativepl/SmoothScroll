@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 APP_NAME="SmoothScroll"
-DMG_NAME="SmoothScroll-1.0"
+DMG_NAME="SmoothScroll-1.1"
 BUILD_DIR="build"
 DMG_DIR="$BUILD_DIR/dmg"
 DMG_PATH="$BUILD_DIR/$DMG_NAME.dmg"
